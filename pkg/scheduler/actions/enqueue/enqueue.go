@@ -108,6 +108,18 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 		}
 		job := jobs.Pop().(*api.JobInfo)
 
+		/*
+			NOTE(Dan): Setting this to true highlights what the real problem is. The allocate action is written in a way
+			that it assumes that no all tasks will be allocated but in practice it _will_ allocate anything that is
+			placed in the Inqueue phase. We also see when setting this to true, that it highly prioritizes users who
+			are using fewer resources.
+
+			Allocate is written like this because it actually uses the resources available on the node while enqueue is
+			working with the queue resources.
+
+			Problem is, enqueue will never put jobs far enough into consideration for the fair-share algorithm to
+			prioritize jobs between different namespaces.
+		*/
 		inqueue := false
 
 		if job.PodGroup.Spec.MinResources == nil {

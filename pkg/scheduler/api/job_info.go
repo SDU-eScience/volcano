@@ -150,6 +150,14 @@ type JobInfo struct {
 	PodGroup          *PodGroup
 }
 
+func (ji *JobInfo) GetUser() string {
+	if val, ok := ji.PodGroup.Annotations["ucloud.dk/user"]; ok {
+		return val
+	} else {
+		return ji.Namespace
+	}
+}
+
 // NewJobInfo creates a new jobInfo for set of tasks
 func NewJobInfo(uid JobID, tasks ...*TaskInfo) *JobInfo {
 	job := &JobInfo{

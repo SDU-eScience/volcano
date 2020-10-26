@@ -104,8 +104,10 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 		lReady := lv.Ready()
 		rReady := rv.Ready()
 
-		klog.V(4).Infof("Gang JobOrderFn: <%v/%v> is ready: %t, <%v/%v> is ready: %t",
-			lv.Namespace, lv.Name, lReady, rv.Namespace, rv.Name, rReady)
+		klog.V(4).Infof("Gang JobOrderFn: <%v/%v> is ready: %t",
+			lv.GetUser(), lv.Name, lReady)
+		klog.V(4).Infof("Gang JobOrderFn: <%v/%v> is ready: %t",
+			rv.GetUser(), rv.Name, rReady)
 
 		if lReady && rReady {
 			return 0
@@ -119,16 +121,20 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 			return -1
 		}
 
-		if !lReady && !rReady {
-			if lv.CreationTimestamp.Equal(&rv.CreationTimestamp) {
-				if lv.UID < rv.UID {
+		/*
+			// NOTE(Dan): This is already the default but it is currently blocking other plugins from taking over.
+			// Removing this such that it will not block later plugins from performing a comparison.
+			if !lReady && !rReady {
+				if lv.CreationTimestamp.Equal(&rv.CreationTimestamp) {
+					if lv.UID < rv.UID {
+						return -1
+					}
+				} else if lv.CreationTimestamp.Before(&rv.CreationTimestamp) {
 					return -1
 				}
-			} else if lv.CreationTimestamp.Before(&rv.CreationTimestamp) {
-				return -1
+				return 1
 			}
-			return 1
-		}
+		*/
 
 		return 0
 	}

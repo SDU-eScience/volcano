@@ -100,21 +100,21 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 		}
 
 		// Calculate the init share of Job
-		drf.updateJobShare(job.Namespace, job.Name, attr)
+		drf.updateJobShare(job.GetUser(), job.Name, attr)
 
 		drf.jobAttrs[job.UID] = attr
 
 		if namespaceOrderEnabled {
-			nsOpts, found := drf.namespaceOpts[job.Namespace]
+			nsOpts, found := drf.namespaceOpts[job.GetUser()]
 			if !found {
 				nsOpts = &drfAttr{
 					allocated: api.EmptyResource(),
 				}
-				drf.namespaceOpts[job.Namespace] = nsOpts
+				drf.namespaceOpts[job.GetUser()] = nsOpts
 			}
 			// all task in job should have the same namespace with job
 			nsOpts.allocated.Add(attr.allocated)
-			drf.updateNamespaceShare(job.Namespace, nsOpts)
+			drf.updateNamespaceShare(job.GetUser(), nsOpts)
 		}
 	}
 
@@ -128,8 +128,8 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 		if namespaceOrderEnabled {
 			// apply the namespace share policy on preemptee firstly
 
-			lWeight := ssn.NamespaceInfo[api.NamespaceName(preemptor.Namespace)].GetWeight()
-			lNsAtt := drf.namespaceOpts[preemptor.Namespace]
+			lWeight := ssn.NamespaceInfo[api.NamespaceName(GetUser(preemptor, ssn))].GetWeight()
+			lNsAtt := drf.namespaceOpts[GetUser(preemptor, ssn)]
 			lNsAlloc := lNsAtt.allocated.Clone().Add(preemptor.Resreq)
 			_, lNsShare := drf.calculateShare(lNsAlloc, drf.totalResource)
 			lNsShareWeighted := lNsShare / float64(lWeight)
@@ -141,20 +141,20 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 			undecidedPreemptees := []*api.TaskInfo{}
 
 			for _, preemptee := range preemptees {
-				if preemptor.Namespace == preemptee.Namespace {
+				if GetUser(preemptor, ssn) == GetUser(preemptee, ssn) {
 					// policy is disabled when they are in the same namespace
 					undecidedPreemptees = append(undecidedPreemptees, preemptee)
 					continue
 				}
 
 				// compute the preemptee namespace weighted share after preemption
-				nsAllocation, found := namespaceAllocation[preemptee.Namespace]
+				nsAllocation, found := namespaceAllocation[GetUser(preemptee, ssn)]
 				if !found {
-					rNsAtt := drf.namespaceOpts[preemptee.Namespace]
+					rNsAtt := drf.namespaceOpts[GetUser(preemptee, ssn)]
 					nsAllocation = rNsAtt.allocated.Clone()
-					namespaceAllocation[preemptee.Namespace] = nsAllocation
+					namespaceAllocation[GetUser(preemptee, ssn)] = nsAllocation
 				}
-				rWeight := ssn.NamespaceInfo[api.NamespaceName(preemptee.Namespace)].GetWeight()
+				rWeight := ssn.NamespaceInfo[api.NamespaceName(GetUser(preemptee, ssn))].GetWeight()
 				rNsAlloc := nsAllocation.Sub(preemptee.Resreq)
 				_, rNsShare := drf.calculateShare(rNsAlloc, drf.totalResource)
 				rNsShareWeighted := rNsShare / float64(rWeight)
@@ -202,12 +202,48 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	ssn.AddPreemptableFn(drf.Name(), preemptableFn)
 
+	namespaceOrderFnBase := func(lUser string, rUser string) int {
+		lOpt := drf.namespaceOpts[lUser]
+		rOpt := drf.namespaceOpts[rUser]
+
+		lWeight := ssn.NamespaceInfo[api.NamespaceName(lUser)].GetWeight()
+		rWeight := ssn.NamespaceInfo[api.NamespaceName(rUser)].GetWeight()
+
+		klog.V(3).Infof("DRF NamespaceOrderFn: <%v> share state: %f, weight %v, <%v> share state: %f, weight %v",
+			lUser, lOpt.share, lWeight, rUser, rOpt.share, rWeight)
+
+		lWeightedShare := lOpt.share / float64(lWeight)
+		rWeightedShare := rOpt.share / float64(rWeight)
+
+		metrics.UpdateNamespaceWeight(lUser, lWeight)
+		metrics.UpdateNamespaceWeight(rUser, rWeight)
+		metrics.UpdateNamespaceWeightedShare(lUser, lWeightedShare)
+		metrics.UpdateNamespaceWeightedShare(rUser, rWeightedShare)
+
+		if lWeightedShare > rWeightedShare {
+			return 1
+		}
+		if lWeightedShare < rWeightedShare {
+			return -1
+		}
+
+		return 0
+	}
+
 	jobOrderFn := func(l interface{}, r interface{}) int {
 		lv := l.(*api.JobInfo)
 		rv := r.(*api.JobInfo)
 
-		klog.V(4).Infof("DRF JobOrderFn: <%v/%v> share state: %v, <%v/%v> share state: %v",
-			lv.Namespace, lv.Name, drf.jobAttrs[lv.UID].share, rv.Namespace, rv.Name, drf.jobAttrs[rv.UID].share)
+		klog.V(4).Infof("DRF JobOrderFn: <%v/%v> share state: %v",
+			lv.Namespace, lv.Name, drf.jobAttrs[lv.UID].share)
+
+		klog.V(4).Infof("DRF JobOrderFn: <%v/%v> share state: %v",
+			rv.Namespace, rv.Name, drf.jobAttrs[rv.UID].share)
+
+		nsv := namespaceOrderFnBase(lv.GetUser(), rv.GetUser())
+		if nsv != 0 {
+			return nsv
+		}
 
 		if drf.jobAttrs[lv.UID].share == drf.jobAttrs[rv.UID].share {
 			return 0
@@ -226,32 +262,7 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 		lv := l.(api.NamespaceName)
 		rv := r.(api.NamespaceName)
 
-		lOpt := drf.namespaceOpts[string(lv)]
-		rOpt := drf.namespaceOpts[string(rv)]
-
-		lWeight := ssn.NamespaceInfo[lv].GetWeight()
-		rWeight := ssn.NamespaceInfo[rv].GetWeight()
-
-		klog.V(4).Infof("DRF NamespaceOrderFn: <%v> share state: %f, weight %v, <%v> share state: %f, weight %v",
-			lv, lOpt.share, lWeight, rv, rOpt.share, rWeight)
-
-		lWeightedShare := lOpt.share / float64(lWeight)
-		rWeightedShare := rOpt.share / float64(rWeight)
-
-		metrics.UpdateNamespaceWeight(string(lv), lWeight)
-		metrics.UpdateNamespaceWeight(string(rv), rWeight)
-		metrics.UpdateNamespaceWeightedShare(string(lv), lWeightedShare)
-		metrics.UpdateNamespaceWeightedShare(string(rv), rWeightedShare)
-
-		if lWeightedShare == rWeightedShare {
-			return 0
-		}
-
-		if lWeightedShare < rWeightedShare {
-			return -1
-		}
-
-		return 1
+		return namespaceOrderFnBase(string(lv), string(rv))
 	}
 
 	if namespaceOrderEnabled {
@@ -265,18 +276,18 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 			attr.allocated.Add(event.Task.Resreq)
 
 			job := ssn.Jobs[event.Task.Job]
-			drf.updateJobShare(job.Namespace, job.Name, attr)
+			drf.updateJobShare(job.GetUser(), job.Name, attr)
 
 			nsShare := -1.0
 			if namespaceOrderEnabled {
-				nsOpt := drf.namespaceOpts[event.Task.Namespace]
+				nsOpt := drf.namespaceOpts[GetUser(event.Task, ssn)]
 				nsOpt.allocated.Add(event.Task.Resreq)
 
-				drf.updateNamespaceShare(event.Task.Namespace, nsOpt)
+				drf.updateNamespaceShare(GetUser(event.Task, ssn), nsOpt)
 				nsShare = nsOpt.share
 			}
 
-			klog.V(4).Infof("DRF AllocateFunc: task <%v/%v>, resreq <%v>,  share <%v>, namespace share <%v>",
+			klog.V(3).Infof("DRF AllocateFunc: task <%v/%v>, resreq <%v>,  share <%v>, namespace share <%v>",
 				event.Task.Namespace, event.Task.Name, event.Task.Resreq, attr.share, nsShare)
 		},
 		DeallocateFunc: func(event *framework.Event) {
@@ -284,18 +295,18 @@ func (drf *drfPlugin) OnSessionOpen(ssn *framework.Session) {
 			attr.allocated.Sub(event.Task.Resreq)
 
 			job := ssn.Jobs[event.Task.Job]
-			drf.updateJobShare(job.Namespace, job.Name, attr)
+			drf.updateJobShare(job.GetUser(), job.Name, attr)
 
 			nsShare := -1.0
 			if namespaceOrderEnabled {
-				nsOpt := drf.namespaceOpts[event.Task.Namespace]
+				nsOpt := drf.namespaceOpts[GetUser(event.Task, ssn)]
 				nsOpt.allocated.Sub(event.Task.Resreq)
 
-				drf.updateNamespaceShare(event.Task.Namespace, nsOpt)
+				drf.updateNamespaceShare(GetUser(event.Task, ssn), nsOpt)
 				nsShare = nsOpt.share
 			}
 
-			klog.V(4).Infof("DRF EvictFunc: task <%v/%v>, resreq <%v>,  share <%v>, namespace share <%v>",
+			klog.V(3).Infof("DRF EvictFunc: task <%v/%v>, resreq <%v>,  share <%v>, namespace share <%v>",
 				event.Task.Namespace, event.Task.Name, event.Task.Resreq, attr.share, nsShare)
 		},
 	})
@@ -333,4 +344,8 @@ func (drf *drfPlugin) OnSessionClose(session *framework.Session) {
 	// Clean schedule data.
 	drf.totalResource = api.EmptyResource()
 	drf.jobAttrs = map[api.JobID]*drfAttr{}
+}
+
+func GetUser(ti *api.TaskInfo, ssn *framework.Session) string {
+	return ssn.Jobs[ti.Job].GetUser()
 }

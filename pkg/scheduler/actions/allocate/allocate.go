@@ -70,7 +70,7 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 			continue
 		}
 
-		namespace := api.NamespaceName(job.Namespace)
+		namespace := api.NamespaceName(job.GetUser())
 		queueMap, found := jobsMap[namespace]
 		if !found {
 			namespaces.Push(namespace)
@@ -85,7 +85,7 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 			queueMap[job.Queue] = jobs
 		}
 
-		klog.V(4).Infof("Added Job <%s/%s> into Queue <%s>", job.Namespace, job.Name, job.Queue)
+		klog.V(4).Infof("Added Job <%s/%s> into Queue <%s>", job.GetUser(), job.Name, job.Queue)
 		jobs.Push(job)
 	}
 
